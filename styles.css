@@ -7,7 +7,7 @@
 
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, #04c99e 0%, #02a085 100%);
     min-height: 100vh;
     color: #333;
 }
@@ -38,21 +38,35 @@ body {
 
 /* Main content */
 .main-content {
-    background: white;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
     border-radius: 20px;
     padding: 40px;
-    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+    box-shadow: 0 20px 40px rgba(4, 201, 158, 0.1), 0 0 0 1px rgba(255, 255, 255, 0.2);
     margin-bottom: 30px;
+    border: 1px solid rgba(4, 201, 158, 0.1);
 }
 
 /* Section headers */
 .main-content h2 {
-    color: #4a5568;
+    color: #2d3748;
     margin-bottom: 20px;
     font-size: 1.5rem;
     display: flex;
     align-items: center;
     gap: 10px;
+    position: relative;
+}
+
+.main-content h2::after {
+    content: '';
+    position: absolute;
+    bottom: -8px;
+    left: 0;
+    width: 50px;
+    height: 3px;
+    background: linear-gradient(90deg, #04c99e, #02a085);
+    border-radius: 2px;
 }
 
 /* File upload area */
@@ -67,20 +81,27 @@ body {
 }
 
 .file-upload-area:hover {
-    border-color: #667eea;
+    border-color: #04c99e;
     background: #edf2f7;
 }
 
 .file-upload-area.dragover {
-    border-color: #667eea;
+    border-color: #04c99e;
     background: #e6fffa;
     transform: scale(1.02);
 }
 
 .file-upload-area i {
     font-size: 3rem;
-    color: #a0aec0;
+    color: #04c99e;
     margin-bottom: 20px;
+    opacity: 0.7;
+    transition: all 0.3s ease;
+}
+
+.file-upload-area:hover i {
+    opacity: 1;
+    transform: scale(1.1);
 }
 
 .file-upload-area p {
@@ -91,11 +112,12 @@ body {
 
 /* File info */
 .file-info {
-    background: #f0fff4;
-    border: 1px solid #9ae6b4;
+    background: linear-gradient(135deg, #e6fffa 0%, #f0fff4 100%);
+    border: 1px solid #04c99e;
     border-radius: 10px;
     padding: 20px;
     margin-top: 20px;
+    box-shadow: 0 4px 12px rgba(4, 201, 158, 0.1);
 }
 
 .file-info p {
@@ -124,9 +146,9 @@ body {
 }
 
 .option-card:hover {
-    border-color: #667eea;
+    border-color: #04c99e;
     transform: translateY(-2px);
-    box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+    box-shadow: 0 10px 25px rgba(4, 201, 158, 0.2);
 }
 
 /* Custom checkbox */
@@ -154,8 +176,8 @@ body {
 }
 
 .checkbox-container input[type="checkbox"]:checked + .checkmark {
-    background: #667eea;
-    border-color: #667eea;
+    background: #04c99e;
+    border-color: #04c99e;
 }
 
 .checkbox-container input[type="checkbox"]:checked + .checkmark::after {
@@ -194,7 +216,7 @@ body {
 
 .text-input:focus {
     outline: none;
-    border-color: #667eea;
+    border-color: #04c99e;
 }
 
 /* Buttons */
@@ -213,14 +235,14 @@ body {
 }
 
 .btn-primary {
-    background: #667eea;
+    background: #04c99e;
     color: white;
 }
 
 .btn-primary:hover {
-    background: #5a67d8;
+    background: #02a085;
     transform: translateY(-2px);
-    box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+    box-shadow: 0 10px 20px rgba(4, 201, 158, 0.4);
 }
 
 .btn-success {
@@ -272,7 +294,7 @@ body {
 
 .progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, #667eea, #764ba2);
+    background: linear-gradient(90deg, #04c99e, #02a085);
     width: 0%;
     transition: width 0.3s ease;
     border-radius: 10px;
@@ -297,11 +319,18 @@ body {
 }
 
 .result-card {
-    background: #f0fff4;
-    border: 2px solid #9ae6b4;
+    background: linear-gradient(135deg, #e6fffa 0%, #f0fff4 100%);
+    border: 2px solid #04c99e;
     border-radius: 15px;
     padding: 25px;
     text-align: center;
+    box-shadow: 0 8px 20px rgba(4, 201, 158, 0.15);
+    transition: all 0.3s ease;
+}
+
+.result-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 30px rgba(4, 201, 158, 0.25);
 }
 
 .result-card h3 {
