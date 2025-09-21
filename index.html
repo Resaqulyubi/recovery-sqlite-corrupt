@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQLite Database Recovery Tool</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1><i class="fas fa-database"></i> SQLite Recovery Tool</h1>
+            <p>Recover data from corrupt SQLite database files</p>
+        </header>
+
+        <main class="main-content">
+            <div class="upload-section">
+                <h2><i class="fas fa-upload"></i> Upload Corrupt Database</h2>
+                <div class="file-upload-area" id="fileUploadArea">
+                    <i class="fas fa-cloud-upload-alt"></i>
+                    <p>Drag and drop your corrupt SQLite database file or ZIP archive here</p>
+                    <p>or</p>
+                    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+                        Choose File
+                    </button>
+                    <input type="file" id="fileInput" accept=".db,.sqlite,.sqlite3,.zip" style="display: none;">
+                </div>
+                <div class="file-info" id="fileInfo" style="display: none;">
+                    <p><strong>Selected file:</strong> <span id="fileName"></span></p>
+                    <p><strong>Size:</strong> <span id="fileSize"></span></p>
+                </div>
+            </div>
+
+            <div class="options-section" id="optionsSection" style="display: none;">
+                <h2><i class="fas fa-cogs"></i> Recovery Options</h2>
+                <div class="options-grid">
+                    <div class="option-card">
+                        <label class="checkbox-container">
+                            <input type="checkbox" id="ignoreFreelist">
+                            <span class="checkmark"></span>
+                            <div class="option-content">
+                                <h3>Ignore Freelist</h3>
+                                <p>Skip pages that appear to be part of the freelist to avoid reintroducing deleted data</p>
+                            </div>
+                        </label>
+                    </div>
+                    
+                    <div class="option-card">
+                        <label class="checkbox-container">
+                            <input type="checkbox" id="noRowids">
+                            <span class="checkmark"></span>
+                            <div class="option-content">
+                                <h3>No ROWIDs</h3>
+                                <p>Don't extract rowid values that are not INTEGER PRIMARY KEY values</p>
+                            </div>
+                        </label>
+                    </div>
+                    
+                    <div class="option-card">
+                        <div class="option-content">
+                            <h3>Lost and Found Table</h3>
+                            <p>Custom name for unassociated content table</p>
+                            <input type="text" id="lostFoundTable" placeholder="lost_and_found" class="text-input">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-section" id="actionSection" style="display: none;">
+                <button class="btn btn-success btn-large" id="recoverBtn">
+                    <i class="fas fa-magic"></i> Start Recovery
+                </button>
+            </div>
+
+            <div class="progress-section" id="progressSection" style="display: none;">
+                <h2><i class="fas fa-spinner fa-spin"></i> Recovery in Progress</h2>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <p id="progressText">Analyzing corrupt database...</p>
+            </div>
+
+            <div class="results-section" id="resultsSection" style="display: none;">
+                <h2><i class="fas fa-check-circle"></i> Recovery Complete</h2>
+                <div class="results-grid">
+                    <div class="result-card">
+                        <h3>SQL Recovery Script</h3>
+                        <p>Contains the SQL commands to reconstruct your database</p>
+                        <button class="btn btn-primary" id="downloadSqlBtn">
+                            <i class="fas fa-download"></i> Download SQL
+                        </button>
+                    </div>
+                    
+                    <div class="result-card">
+                        <h3>Recovered Database</h3>
+                        <p>New SQLite database file with recovered data</p>
+                        <button class="btn btn-primary" id="downloadDbBtn">
+                            <i class="fas fa-download"></i> Download DB
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="recovery-stats" id="recoveryStats">
+                    <h3>Recovery Statistics</h3>
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <span class="stat-label">Tables Recovered:</span>
+                            <span class="stat-value" id="tablesRecovered">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Records Recovered:</span>
+                            <span class="stat-value" id="recordsRecovered">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Data Size:</span>
+                            <span class="stat-value" id="dataSize">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="error-section" id="errorSection" style="display: none;">
+                <h2><i class="fas fa-exclamation-triangle"></i> Recovery Failed</h2>
+                <div class="error-message" id="errorMessage"></div>
+                <button class="btn btn-secondary" onclick="resetTool()">
+                    <i class="fas fa-redo"></i> Try Again
+                </button>
+            </div>
+        </main>
+
+        <footer class="footer">
+            <p>Based on SQLite official recovery documentation</p>
+            <a href="https://www.sqlite.org/recovery.html" target="_blank">
+                <i class="fas fa-external-link-alt"></i> SQLite Recovery Guide
+            </a>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
