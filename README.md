@@ -1,6 +1,6 @@
 Demo : 
 https://recovery-sqlite.nury.my.id/
-Another project check on :
+Another project check at:
 https://portfolio.qulyubis.biz.id/
 -------------------------------------
 
