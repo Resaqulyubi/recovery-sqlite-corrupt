@@ -20,6 +20,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 
+// Progress tracking store
+const progressStore = new Map();
+
 // Configure multer for file uploads
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -57,12 +60,73 @@ async function ensureUploadsDir() {
     }
 }
 
+// Clean up old recovery files (keep only files modified in last 5 minutes)
+async function cleanupOldRecoveryFiles() {
+    try {
+        console.log('[CLEANUP] Starting cleanup of old recovery files...');
+        const uploadsDir = 'uploads';
+        const files = await fs.readdir(uploadsDir);
+        const now = Date.now();
+        const fiveMinutesAgo = now - (5 * 60 * 1000); // 5 minutes in milliseconds
+        
+        let deletedCount = 0;
+        
+        for (const file of files) {
+            const filePath = path.join(uploadsDir, file);
+            
+            try {
+                const stats = await fs.stat(filePath);
+                
+                // Only delete old recovery-related files, keep recent ones
+                if (file.startsWith('recovery_') || 
+                    file.startsWith('recovered_') || 
+                    file.startsWith('manual_recovery_') || 
+                    file.startsWith('manual_recovered_') || 
+                    file.startsWith('extracted_')) {
+                    
+                    // Delete if older than 5 minutes
+                    if (stats.mtimeMs < fiveMinutesAgo) {
+                        await fs.unlink(filePath);
+                        deletedCount++;
+                        console.log(`[CLEANUP] Deleted old file: ${file}`);
+                    }
+                }
+            } catch (err) {
+                // Skip files that can't be accessed
+                console.log(`[CLEANUP] Could not process ${file}:`, err.message);
+            }
+        }
+        
+        console.log(`[CLEANUP] Cleanup complete. Deleted ${deletedCount} old file(s)`);
+    } catch (error) {
+        console.error('[CLEANUP] Cleanup error:', error.message);
+        // Don't fail the recovery if cleanup fails
+    }
+}
+
 // Recovery endpoint
 app.post('/api/recover', upload.single('database'), async (req, res) => {
+    // Set timeout for large file processing (10 minutes)
+    req.setTimeout(600000); // 10 minutes in milliseconds
+    res.setTimeout(600000);
+    
+    const sessionId = req.headers['x-session-id'] || Date.now().toString();
+    
+    // Clean up old recovery files before starting new recovery
+    await cleanupOldRecoveryFiles();
+    
     try {
         if (!req.file) {
             return res.status(400).json({ error: 'No database file uploaded' });
         }
+
+        sendProgress(sessionId, { 
+            type: 'progress', 
+            phase: 'upload', 
+            progress: 10, 
+            message: 'File uploaded successfully',
+            detail: `Received ${formatFileSize(req.file.size)}`
+        });
 
         const { ignoreFreelist, noRowids, lostFoundTable } = req.body;
         let inputPath = req.file.path;
@@ -72,10 +136,28 @@ app.post('/api/recover', upload.single('database'), async (req, res) => {
         
         // Handle ZIP files
         if (path.extname(req.file.originalname).toLowerCase() === '.zip') {
-            const extractedPath = await extractSqliteFromZip(inputPath, timestamp);
+            console.log(`Processing ZIP file: ${req.file.originalname} (${req.file.size} bytes)`);
+            sendProgress(sessionId, { 
+                type: 'progress', 
+                phase: 'extraction', 
+                progress: 15, 
+                message: 'Extracting ZIP archive',
+                detail: 'Reading ZIP file contents...'
+            });
+            
+            const extractedPath = await extractSqliteFromZip(inputPath, timestamp, sessionId);
             if (!extractedPath) {
                 throw new Error('No SQLite database file found in the ZIP archive');
             }
+            
+            sendProgress(sessionId, { 
+                type: 'progress', 
+                phase: 'extraction', 
+                progress: 20, 
+                message: 'ZIP extraction complete',
+                detail: `Extracted ${formatFileSize(extractedPath.size)}`
+            });
+            
             // Clean up original ZIP file
             await fs.unlink(inputPath);
             inputPath = extractedPath.path;
@@ -107,21 +189,45 @@ app.post('/api/recover', upload.single('database'), async (req, res) => {
 
         // Execute recovery command
         console.log(`Executing recovery command: sqlite3 "${inputPath}" "${recoverCommand}"`);
-        const recoveryResult = await executeRecovery(inputPath, recoverCommand, sqlOutputPath);
+        sendProgress(sessionId, { 
+            type: 'progress', 
+            phase: 'recovery', 
+            progress: 25, 
+            message: 'Starting database recovery',
+            detail: 'Running SQLite recovery command...'
+        });
+        
+        const recoveryResult = await executeRecovery(inputPath, recoverCommand, sqlOutputPath, sessionId);
         
         if (!recoveryResult.success) {
             throw new Error(recoveryResult.error);
         }
 
+        sendProgress(sessionId, { 
+            type: 'progress', 
+            phase: 'database', 
+            progress: 70, 
+            message: 'Creating recovered database',
+            detail: 'Importing SQL into new database...'
+        });
+
         // Create recovered database from SQL
-        const dbCreationResult = await createDatabaseFromSql(sqlOutputPath, dbOutputPath);
+        const dbCreationResult = await createDatabaseFromSql(sqlOutputPath, dbOutputPath, sessionId);
         
         if (!dbCreationResult.success) {
             throw new Error(dbCreationResult.error);
         }
 
+        sendProgress(sessionId, { 
+            type: 'progress', 
+            phase: 'stats', 
+            progress: 95, 
+            message: 'Calculating statistics',
+            detail: 'Analyzing recovered data...'
+        });
+
         // Get recovery statistics
-        const stats = await getRecoveryStats(sqlOutputPath, dbOutputPath);
+        const stats = await getRecoveryStats(sqlOutputPath, dbOutputPath, sessionId);
 
         // Clean up original uploaded file (only if it still exists)
         try {
@@ -220,6 +326,191 @@ app.get('/api/download/:filename', async (req, res) => {
     }
 });
 
+// Manual table-by-table recovery endpoint
+app.post('/api/manual-recovery', upload.single('database'), async (req, res) => {
+    req.setTimeout(1800000); // 30 minutes
+    res.setTimeout(1800000);
+    
+    const sessionId = req.headers['x-session-id'] || Date.now().toString();
+    
+    // Clean up old recovery files before starting new recovery
+    await cleanupOldRecoveryFiles();
+    
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No database file uploaded' });
+        }
+
+        let inputPath = req.file.path;
+        let originalInputPath = req.file.path;
+        const timestamp = Date.now();
+        let baseName = path.basename(req.file.originalname, path.extname(req.file.originalname));
+
+        // Handle ZIP files - extract first
+        if (path.extname(req.file.originalname).toLowerCase() === '.zip') {
+            console.log(`[MANUAL] Processing ZIP file: ${req.file.originalname}`);
+            sendProgress(sessionId, {
+                type: 'progress',
+                phase: 'extraction',
+                progress: 5,
+                message: 'Extracting ZIP archive',
+                detail: 'Reading ZIP file contents...'
+            });
+            
+            const extractedPath = await extractSqliteFromZip(inputPath, timestamp, sessionId);
+            if (!extractedPath) {
+                throw new Error('No SQLite database file found in the ZIP archive');
+            }
+            
+            sendProgress(sessionId, {
+                type: 'progress',
+                phase: 'extraction',
+                progress: 10,
+                message: 'ZIP extraction complete',
+                detail: `Extracted database file`
+            });
+            
+            // Clean up original ZIP file
+            await fs.unlink(inputPath);
+            inputPath = extractedPath.path;
+            baseName = extractedPath.baseName;
+        }
+
+        const outputPath = `uploads/manual_recovery_${timestamp}_${baseName}.sql`;
+        const dbOutputPath = `uploads/manual_recovered_${timestamp}_${baseName}.db`;
+
+        sendProgress(sessionId, {
+            type: 'progress',
+            phase: 'recovery',
+            progress: 15,
+            message: 'Starting manual table-by-table recovery',
+            detail: 'This may take a while for large databases...'
+        });
+
+        // Use table-by-table recovery directly
+        const result = await tryTableByTableRecovery(inputPath, outputPath, sessionId);
+        
+        if (!result.success) {
+            throw new Error(result.error);
+        }
+
+        sendProgress(sessionId, {
+            type: 'progress',
+            phase: 'database',
+            progress: 75,
+            message: 'Creating recovered database',
+            detail: 'Importing SQL into new database...'
+        });
+
+        // Create database from recovered SQL
+        const dbResult = await createDatabaseFromSql(outputPath, dbOutputPath, sessionId);
+        
+        if (!dbResult.success) {
+            throw new Error(dbResult.error);
+        }
+
+        // Clean up original uploaded file
+        try {
+            await fs.unlink(inputPath);
+        } catch (e) {}
+
+        res.json({
+            success: true,
+            sqlFile: path.basename(outputPath),
+            dbFile: path.basename(dbOutputPath),
+            tablesRecovered: result.tablesRecovered,
+            totalTables: result.tablesRecovered + result.tablesFailed
+        });
+
+    } catch (error) {
+        console.error('Manual recovery error:', error);
+        
+        // Clean up files on error
+        if (req.file) {
+            try {
+                await fs.unlink(req.file.path);
+            } catch (e) {}
+        }
+        
+        // Also clean up extracted file if it exists
+        if (typeof inputPath !== 'undefined' && inputPath !== originalInputPath) {
+            try {
+                await fs.unlink(inputPath);
+            } catch (e) {}
+        }
+        
+        res.status(500).json({ 
+            error: error.message || 'Manual recovery failed' 
+        });
+    }
+});
+
+// Check recovery status endpoint
+app.get('/api/status', async (req, res) => {
+    try {
+        const uploadsDir = 'uploads';
+        const sqlFiles = require('fs').readdirSync(uploadsDir)
+            .filter(f => (f.startsWith('recovery_') || f.startsWith('manual_recovery_')) && f.endsWith('.sql'))
+            .map(f => ({
+                name: f,
+                path: path.join(uploadsDir, f),
+                mtime: require('fs').statSync(path.join(uploadsDir, f)).mtime,
+                size: require('fs').statSync(path.join(uploadsDir, f)).size
+            }))
+            .sort((a, b) => b.mtime - a.mtime);
+
+        if (sqlFiles.length === 0) {
+            return res.json({
+                isActive: false,
+                isStuck: false,
+                message: 'No recovery files found'
+            });
+        }
+
+        const latestFile = sqlFiles[0];
+        const ageSeconds = Math.round((Date.now() - latestFile.mtime.getTime()) / 1000);
+        const sizeMB = Math.round(latestFile.size / 1024 / 1024);
+
+        res.json({
+            isActive: ageSeconds <= 120,
+            isStuck: ageSeconds > 120,
+            fileName: latestFile.name,
+            fileSize: `${sizeMB} MB`,
+            lastModified: latestFile.mtime.toLocaleString(),
+            idleSeconds: ageSeconds
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Force stop recovery endpoint
+app.post('/api/force-stop', async (req, res) => {
+    try {
+        const { exec } = require('child_process');
+        const stopped = [];
+
+        // Kill SQLite processes (Windows)
+        await new Promise((resolve) => {
+            exec('taskkill /F /IM sqlite3.exe', (err, stdout) => {
+                if (!err && stdout && !stdout.includes('not found')) {
+                    stopped.push('SQLite processes');
+                }
+                resolve();
+            });
+        });
+
+        res.json({
+            success: stopped.length > 0,
+            stopped: stopped.length > 0 ? stopped : ['No processes found']
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Check SQLite version and .recover command availability
 function checkSqliteVersion() {
     return new Promise((resolve) => {
@@ -312,7 +603,7 @@ function testRecoverCommand() {
 }
 
 // Execute SQLite recovery command
-function executeRecovery(inputPath, recoverCommand, outputPath) {
+function executeRecovery(inputPath, recoverCommand, outputPath, sessionId) {
     return new Promise(async (resolve) => {
         // First check SQLite version
         const versionCheck = await checkSqliteVersion();
@@ -329,7 +620,7 @@ function executeRecovery(inputPath, recoverCommand, outputPath) {
                 console.log('Detected Android SDK SQLite - using .dump method instead');
             }
             // Skip .recover and go directly to alternative methods
-            const altResult = await tryAlternativeRecovery(inputPath, outputPath);
+            const altResult = await tryAlternativeRecovery(inputPath, outputPath, sessionId);
             return resolve(altResult);
         }
         
@@ -376,7 +667,7 @@ function executeRecovery(inputPath, recoverCommand, outputPath) {
                 } else {
                     // Try alternative recovery method
                     console.log('Standard .recover failed, trying alternative approach...');
-                    const altResult = await tryAlternativeRecovery(inputPath, outputPath);
+                    const altResult = await tryAlternativeRecovery(inputPath, outputPath, sessionId);
                     resolve(altResult);
                 }
             } catch (writeError) {
@@ -397,14 +688,22 @@ function executeRecovery(inputPath, recoverCommand, outputPath) {
 }
 
 // Alternative recovery methods when .recover fails
-async function tryAlternativeRecovery(inputPath, outputPath) {
+async function tryAlternativeRecovery(inputPath, outputPath, sessionId) {
     console.log('Trying alternative recovery methods...');
     
-    // Method 1: Try .dump command (older method)
-    console.log('Trying .dump command...');
-    const dumpResult = await tryDumpCommand(inputPath, outputPath);
-    if (dumpResult.success) {
-        return dumpResult;
+    // Skip .dump for corrupted databases - go straight to table-by-table
+    console.log('Skipping .dump (causes hangs) - using table-by-table recovery...');
+    sendProgress(sessionId, {
+        type: 'progress',
+        phase: 'recovery',
+        progress: 30,
+        message: 'Using table-by-table recovery',
+        detail: 'Recovering each table individually...'
+    });
+    
+    const tableResult = await tryTableByTableRecovery(inputPath, outputPath, sessionId);
+    if (tableResult.success) {
+        return tableResult;
     }
     
     // Method 2: Try to extract schema and data separately
@@ -420,10 +719,274 @@ async function tryAlternativeRecovery(inputPath, outputPath) {
     return basicResult;
 }
 
-// Try using .dump command
-function tryDumpCommand(inputPath, outputPath) {
-    return new Promise((resolve) => {
+// Try using .dump command - stream output directly to file for large databases
+function tryDumpCommand(inputPath, outputPath, sessionId) {
+    return new Promise(async (resolve) => {
+        console.log('[DUMP] Starting .dump command with streaming output...');
+        
+        // Get input file size for progress calculation
+        let inputSize = 0;
+        try {
+            const stats = await fs.stat(inputPath);
+            inputSize = stats.size;
+            console.log(`[DUMP] Input database size: ${formatFileSize(inputSize)}`);
+        } catch (e) {
+            // Continue anyway
+        }
+        
         const sqlite3 = spawn('sqlite3', [inputPath, '.dump'], {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let error = '';
+        let bytesWritten = 0;
+        let writeError = null;
+        let lastProgressUpdate = Date.now();
+        let lastDataReceived = Date.now();
+        let processComplete = false;
+        let lastSignificantProgress = Date.now();
+        let bytesAtLastCheck = 0;
+        let lastSignificantSize = 0;
+        let timeAtLastSignificantSize = Date.now();
+        
+        // Create write stream to output file FIRST
+        const outputStream = require('fs').createWriteStream(outputPath);
+        
+        outputStream.on('error', (err) => {
+            console.error('[DUMP] Write stream error:', err);
+            writeError = err;
+        });
+        
+        // Immediate check after 20 seconds if absolutely no data
+        setTimeout(() => {
+            if (bytesWritten === 0 && !processComplete) {
+                process.stderr.write(`[TIMEOUT] Process produced zero bytes after 20s - database too corrupted for .dump!\n`);
+                process.stderr.write('[TIMEOUT] Killing process and switching to table-by-table recovery...\n');
+                
+                processComplete = true;
+                try {
+                    sqlite3.kill('SIGKILL');
+                } catch (e) {}
+                
+                try {
+                    outputStream.end();
+                } catch (e) {}
+                
+                resolve({ 
+                    success: false, 
+                    error: 'Database too corrupted for full dump - switching to table recovery',
+                    timeout: true,
+                    partialData: false
+                });
+            }
+        }, 20000); // 20 seconds absolute timeout for zero output
+
+        // Absolute watchdog - check every 30 seconds if stuck at same size
+        const processStartTime = Date.now();
+        const watchdogInterval = setInterval(() => {
+            if (processComplete) return;
+            
+            const mbWritten = Math.round(bytesWritten / 1024 / 1024);
+            const mbLastSignificant = Math.round(lastSignificantSize / 1024 / 1024);
+            const timeSinceSignificant = Math.round((Date.now() - timeAtLastSignificantSize) / 1000);
+            const timeSinceStart = Math.round((Date.now() - processStartTime) / 1000);
+            
+            process.stdout.write(`[WATCHDOG] Check: at ${mbWritten} MB, ${timeSinceSignificant}s since last significant progress (${mbLastSignificant} MB), ${timeSinceStart}s since process start\n`);
+            
+            // If NO output at all for 15 seconds, kill it
+            if (bytesWritten === 0 && timeSinceStart >= 15) {
+                process.stderr.write(`[WATCHDOG] NO OUTPUT TIMEOUT: Process produced zero bytes after ${timeSinceStart}s!\n`);
+                process.stderr.write('[WATCHDOG] .dump command not working - falling back to table-by-table recovery...\n');
+                
+                processComplete = true;
+                clearInterval(heartbeatInterval);
+                clearInterval(watchdogInterval);
+                
+                try {
+                    sqlite3.kill('SIGKILL');
+                } catch (e) {}
+                
+                outputStream.end();
+                resolve({ 
+                    success: false, 
+                    error: 'Process produced no output - database may be too corrupted for .dump',
+                    timeout: true,
+                    partialData: false
+                });
+            }
+            // If stuck at same size for 3 minutes, kill it
+            else if (timeSinceSignificant >= 180 && bytesWritten > 0) {
+                console.error(`[WATCHDOG] ABSOLUTE TIMEOUT: Stuck at ${mbWritten} MB for ${timeSinceSignificant}s!`);
+                console.error('[WATCHDOG] SQLite stuck on corrupted data - killing process and falling back to table recovery...');
+                
+                processComplete = true;
+                clearInterval(heartbeatInterval);
+                clearInterval(watchdogInterval);
+                
+                try {
+                    sqlite3.kill('SIGKILL');
+                } catch (e) {}
+                
+                outputStream.end();
+                resolve({ 
+                    success: false, 
+                    error: 'Process stuck on corrupted data - timeout',
+                    timeout: true,
+                    partialData: bytesWritten > 0
+                });
+            }
+        }, 15000); // Check every 15 seconds
+        
+        console.log('[DUMP] Watchdog armed - will check every 15s and kill if no output for 15s or stuck for 3 minutes');
+
+        // Heartbeat monitor - log progress every 10 seconds even if no new data
+        let heartbeatCount = 0;
+        console.log('[DUMP] Setting up heartbeat monitor (10s interval)...');
+        const heartbeatInterval = setInterval(() => {
+            try {
+                heartbeatCount++;
+                if (processComplete) {
+                    console.log(`[DUMP] Heartbeat #${heartbeatCount} skipped - process already complete`);
+                    return;
+                }
+                
+                const mbWritten = Math.round(bytesWritten / 1024 / 1024);
+                const timeSinceLastData = Math.round((Date.now() - lastDataReceived) / 1000);
+                const progressSinceLastCheck = bytesWritten - bytesAtLastCheck;
+                const mbProgressSinceCheck = Math.round(progressSinceLastCheck / 1024 / 1024);
+                
+                process.stdout.write(`[DUMP] Heartbeat #${heartbeatCount}: ${mbWritten} MB written, ${timeSinceLastData}s since last data, +${mbProgressSinceCheck} MB since last check\n`);
+                
+                // Update significant progress tracker
+                if (progressSinceLastCheck > 1024 * 1024) { // More than 1 MB progress
+                    lastSignificantProgress = Date.now();
+                    bytesAtLastCheck = bytesWritten;
+                }
+                
+                const timeSinceProgress = Math.round((Date.now() - lastSignificantProgress) / 1000);
+                
+                // If no significant progress (< 1 MB) for 120 seconds, kill the process
+                if (timeSinceProgress > 120 && bytesWritten > 0) {
+                    console.error(`[DUMP] TIMEOUT: Only ${mbProgressSinceCheck} MB written in last 120 seconds - killing stuck process`);
+                    console.error(`[DUMP] Total written: ${mbWritten} MB. SQLite appears stuck on corrupted data.`);
+                    console.error('[DUMP] Will try table-by-table recovery to salvage data...');
+                    
+                    processComplete = true;
+                    clearInterval(heartbeatInterval);
+                    
+                    try {
+                        sqlite3.kill('SIGTERM');
+                        setTimeout(() => {
+                            try {
+                                if (!sqlite3.killed) {
+                                    sqlite3.kill('SIGKILL');
+                                }
+                            } catch (e) {}
+                        }, 1000);
+                    } catch (e) {
+                        console.error('[DUMP] Error killing process:', e);
+                    }
+                    
+                    outputStream.end();
+                    resolve({ 
+                        success: false, 
+                        error: 'Dump process timeout - database too corrupted for full dump',
+                        timeout: true,
+                        partialData: bytesWritten > 0
+                    });
+                } else if (timeSinceProgress > 60 && bytesWritten > 0) {
+                    console.warn(`[DUMP] WARNING: Only ${mbProgressSinceCheck} MB in last ${timeSinceProgress}s - SQLite may be stuck on corrupted data`);
+                }
+            } catch (error) {
+                console.error('[DUMP] Heartbeat error:', error);
+            }
+        }, 10000); // Every 10 seconds
+
+        // Pipe stdout directly to file
+        sqlite3.stdout.on('data', (data) => {
+            bytesWritten += data.length;
+            lastDataReceived = Date.now();
+            
+            // Track significant progress (>10 MB increase) to reset absolute timeout
+            if (bytesWritten - lastSignificantSize > 10 * 1024 * 1024) {
+                lastSignificantSize = bytesWritten;
+                timeAtLastSignificantSize = Date.now();
+            }
+            
+            const now = Date.now();
+            
+            // Update progress every 3 seconds or every 50MB
+            if (now - lastProgressUpdate > 3000 || bytesWritten % (50 * 1024 * 1024) < data.length) {
+                const mbWritten = Math.round(bytesWritten / 1024 / 1024);
+                console.log(`[DUMP] Written ${mbWritten} MB...`);
+                
+                // Estimate progress based on typical SQL dump size (usually 1-2x the DB size)
+                const estimatedTotal = inputSize * 1.5;
+                const progressPercent = Math.min(65, 30 + Math.round((bytesWritten / estimatedTotal) * 35));
+                
+                sendProgress(sessionId, {
+                    type: 'progress',
+                    phase: 'recovery',
+                    progress: progressPercent,
+                    message: 'Dumping database content',
+                    detail: `Extracted ${mbWritten} MB so far...`
+                });
+                
+                lastProgressUpdate = now;
+            }
+        });
+        
+        sqlite3.stdout.pipe(outputStream);
+
+        sqlite3.stderr.on('data', (data) => {
+            const errMsg = data.toString();
+            error += errMsg;
+            // Log stderr immediately to catch SQLite errors/warnings
+            if (errMsg.trim()) {
+                console.log('[DUMP] SQLite stderr:', errMsg.trim());
+            }
+        });
+
+        sqlite3.on('close', async (code) => {
+            processComplete = true;
+            clearInterval(heartbeatInterval);
+            clearInterval(watchdogInterval);
+            
+            // Wait for write stream to finish
+            outputStream.end();
+            
+            await new Promise(resolve => outputStream.on('finish', resolve));
+            
+            const finalSize = Math.round(bytesWritten / 1024 / 1024);
+            console.log(`[DUMP] Process completed. Total written: ${finalSize} MB, Exit code: ${code}`);
+            
+            if (writeError) {
+                console.log('[DUMP] Failed to write output file:', writeError.message);
+                resolve({ success: false, error: writeError.message });
+            } else if (code === 0 && bytesWritten > 0) {
+                console.log(`[DUMP] Successfully dumped ${finalSize} MB using .dump command`);
+                resolve({ success: true });
+            } else {
+                console.log('[DUMP] .dump command failed:', error);
+                resolve({ success: false, error: error || 'No data recovered' });
+            }
+        });
+
+        sqlite3.on('error', (err) => {
+            processComplete = true;
+            clearInterval(heartbeatInterval);
+            clearInterval(watchdogInterval);
+            console.error('[DUMP] Spawn error:', err);
+            outputStream.end();
+            resolve({ success: false, error: err.message });
+        });
+    });
+}
+
+// Query database helper function
+function queryDatabase(dbPath, query) {
+    return new Promise((resolve) => {
+        const sqlite3 = spawn('sqlite3', [dbPath, '-json', query], {
             stdio: ['pipe', 'pipe', 'pipe']
         });
 
@@ -438,22 +1001,142 @@ function tryDumpCommand(inputPath, outputPath) {
             error += data.toString();
         });
 
-        sqlite3.on('close', async (code) => {
-            try {
-                if (code === 0 && output.length > 0) {
-                    await fs.writeFile(outputPath, output, 'utf8');
-                    console.log('Successfully recovered using .dump command');
-                    resolve({ success: true });
-                } else {
-                    console.log('.dump command failed:', error);
-                    resolve({ success: false, error: error });
+        sqlite3.on('close', (code) => {
+            if (code === 0 && output.trim()) {
+                try {
+                    const result = JSON.parse(output);
+                    resolve(result);
+                } catch (e) {
+                    console.error('[QUERY] Failed to parse JSON:', e);
+                    resolve([]);
                 }
-            } catch (writeError) {
-                resolve({ success: false, error: writeError.message });
+            } else {
+                console.error('[QUERY] Query failed:', error);
+                resolve([]);
             }
         });
 
         sqlite3.on('error', (err) => {
+            console.error('[QUERY] Spawn error:', err);
+            resolve([]);
+        });
+    });
+}
+
+// Try table-by-table recovery - recover each table individually and skip corrupted ones
+async function tryTableByTableRecovery(inputPath, outputPath, sessionId) {
+    console.log('[TABLE] Starting table-by-table recovery...');
+    
+    try {
+        // Get list of all tables
+        const tables = await queryDatabase(inputPath, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
+        
+        if (!tables || tables.length === 0) {
+            console.log('[TABLE] No tables found in database');
+            return { success: false, error: 'No tables found' };
+        }
+        
+        console.log(`[TABLE] Found ${tables.length} tables to recover`);
+        
+        // Write header to file immediately - avoid memory accumulation
+        let header = '-- Table-by-Table Recovery\n';
+        header += '-- Some tables may be skipped due to corruption\n';
+        header += 'PRAGMA foreign_keys=OFF;\n\n';
+        
+        await fs.writeFile(outputPath, header, 'utf8');
+        
+        let successCount = 0;
+        let failedTables = [];
+        
+        for (let i = 0; i < tables.length; i++) {
+            const tableName = tables[i].name;
+            const progress = 35 + Math.round((i / tables.length) * 30); // 35-65%
+            
+            console.log(`[TABLE] Recovering table ${i + 1}/${tables.length}: ${tableName}`);
+            sendProgress(sessionId, {
+                type: 'progress',
+                phase: 'recovery',
+                progress: progress,
+                message: 'Recovering tables individually',
+                detail: `Table ${i + 1}/${tables.length}: ${tableName}`
+            });
+            
+            const tableResult = await dumpSingleTable(inputPath, tableName);
+            
+            if (tableResult.success) {
+                // Write directly to file to avoid memory issues
+                const tableData = `\n-- Table: ${tableName}\n${tableResult.sql}\n`;
+                await fs.appendFile(outputPath, tableData, 'utf8');
+                successCount++;
+                console.log(`[TABLE] ✓ Successfully recovered ${tableName}`);
+            } else {
+                failedTables.push(tableName);
+                console.log(`[TABLE] ✗ Failed to recover ${tableName}: ${tableResult.error}`);
+                await fs.appendFile(outputPath, `\n-- Table: ${tableName} (FAILED - ${tableResult.error})\n`, 'utf8');
+            }
+        }
+        
+        // Write footer
+        let footer = '\n-- Recovery Summary:\n';
+        footer += `-- Successfully recovered: ${successCount}/${tables.length} tables\n`;
+        if (failedTables.length > 0) {
+            footer += `-- Failed tables: ${failedTables.join(', ')}\n`;
+        }
+        
+        await fs.appendFile(outputPath, footer, 'utf8');
+        
+        console.log(`[TABLE] Recovery complete: ${successCount}/${tables.length} tables recovered`);
+        
+        if (successCount > 0) {
+            return { success: true, tablesRecovered: successCount, tablesFailed: failedTables.length };
+        } else {
+            return { success: false, error: 'All tables failed to recover' };
+        }
+        
+    } catch (error) {
+        console.error('[TABLE] Table-by-table recovery error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Dump a single table with timeout protection
+function dumpSingleTable(dbPath, tableName) {
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            console.log(`[TABLE] Timeout recovering ${tableName}`);
+            try {
+                sqlite3.kill('SIGTERM');
+            } catch (e) {}
+            resolve({ success: false, error: 'timeout' });
+        }, 30000); // 30 second timeout per table
+        
+        const sqlite3 = spawn('sqlite3', [dbPath, `.dump "${tableName}"`], {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let output = '';
+        let error = '';
+
+        sqlite3.stdout.on('data', (data) => {
+            output += data.toString();
+        });
+
+        sqlite3.stderr.on('data', (data) => {
+            error += data.toString();
+        });
+
+        sqlite3.on('close', (code) => {
+            clearTimeout(timeout);
+            
+            if (code === 0 && output.length > 0) {
+                resolve({ success: true, sql: output });
+            } else {
+                resolve({ success: false, error: error || 'dump failed' });
+            }
+        });
+
+        sqlite3.on('error', (err) => {
+            clearTimeout(timeout);
             resolve({ success: false, error: err.message });
         });
     });
@@ -558,22 +1241,70 @@ function tryBasicExtraction(inputPath, outputPath) {
 }
 
 // Create database from SQL file
-function createDatabaseFromSql(sqlPath, dbPath) {
-    return new Promise((resolve) => {
+function createDatabaseFromSql(sqlPath, dbPath, sessionId) {
+    return new Promise(async (resolve) => {
+        console.log('[DB CREATE] Creating database from SQL file...');
+        
+        let totalSize = 0;
+        try {
+            const sqlStats = await fs.stat(sqlPath);
+            totalSize = sqlStats.size;
+            console.log(`[DB CREATE] SQL file size: ${formatFileSize(sqlStats.size)}`);
+        } catch (e) {
+            // Continue anyway
+        }
+        
         const sqlite3 = spawn('sqlite3', [dbPath], {
             stdio: ['pipe', 'pipe', 'pipe']
         });
 
         let error = '';
+        let bytesRead = 0;
+        let lastLog = Date.now();
+
+        const inputStream = require('fs').createReadStream(sqlPath);
+        
+        inputStream.on('data', (chunk) => {
+            bytesRead += chunk.length;
+            // Log progress every 5 seconds
+            const now = Date.now();
+            if (now - lastLog > 5000) {
+                const mbRead = Math.round(bytesRead / 1024 / 1024);
+                console.log(`[DB CREATE] Processing: ${mbRead} MB...`);
+                
+                // Calculate progress (70-95% range for DB creation phase)
+                const progressPercent = totalSize > 0 
+                    ? Math.min(95, 70 + Math.round((bytesRead / totalSize) * 25))
+                    : 80;
+                    
+                sendProgress(sessionId, {
+                    type: 'progress',
+                    phase: 'database',
+                    progress: progressPercent,
+                    message: 'Creating recovered database',
+                    detail: `Processing ${mbRead} MB of ${Math.round(totalSize / 1024 / 1024)} MB...`
+                });
+                
+                lastLog = now;
+            }
+        });
 
         sqlite3.stderr.on('data', (data) => {
             error += data.toString();
+            // Log any warnings/errors during import
+            const errStr = data.toString();
+            if (errStr.trim()) {
+                console.log('[DB CREATE] SQLite message:', errStr.trim());
+            }
         });
 
         sqlite3.on('close', (code) => {
+            console.log(`[DB CREATE] SQLite process finished with code ${code}`);
             if (code === 0) {
+                console.log('[DB CREATE] Database created successfully');
                 resolve({ success: true });
             } else {
+                console.log('[DB CREATE] Database creation failed:', error);
                 resolve({ 
                     success: false, 
                     error: error || 'Database creation failed' 
@@ -582,6 +1313,7 @@ function createDatabaseFromSql(sqlPath, dbPath) {
         });
 
         sqlite3.on('error', (err) => {
+            console.error('[DB CREATE] Spawn error:', err);
             resolve({ 
                 success: false, 
                 error: `Failed to create database: ${err.message}` 
@@ -589,33 +1321,99 @@ function createDatabaseFromSql(sqlPath, dbPath) {
         });
 
         // Pipe SQL file content to sqlite3
-        require('fs').createReadStream(sqlPath).pipe(sqlite3.stdin);
+        inputStream.pipe(sqlite3.stdin);
     });
 }
 
-// Get recovery statistics
+// Get recovery statistics - query database directly to avoid loading large SQL files
 async function getRecoveryStats(sqlPath, dbPath) {
     try {
-        const sqlContent = await fs.readFile(sqlPath, 'utf8');
         const dbStats = await fs.stat(dbPath);
+        const sqlStats = await fs.stat(sqlPath);
         
-        // Count tables and insert statements
-        const createTableMatches = sqlContent.match(/CREATE TABLE/gi) || [];
-        const insertMatches = sqlContent.match(/INSERT INTO/gi) || [];
+        // Query the recovered database directly for accurate stats
+        const tableCount = await queryDatabase(dbPath, "SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
+        
+        // Get total row count across all tables
+        const tables = await queryDatabase(dbPath, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
+        let totalRows = 0;
+        
+        if (tables && Array.isArray(tables)) {
+            for (const table of tables) {
+                try {
+                    const rowCount = await queryDatabase(dbPath, `SELECT COUNT(*) as count FROM "${table.name}"`);
+                    if (rowCount && rowCount[0]) {
+                        totalRows += rowCount[0].count || 0;
+                    }
+                } catch (err) {
+                    console.log(`Could not count rows in table ${table.name}:`, err.message);
+                }
+            }
+        }
         
         return {
-            tablesRecovered: createTableMatches.length,
-            recordsRecovered: insertMatches.length,
-            dataSize: formatFileSize(dbStats.size)
+            tablesRecovered: tableCount && tableCount[0] ? tableCount[0].count : 0,
+            recordsRecovered: totalRows,
+            dataSize: formatFileSize(dbStats.size),
+            sqlSize: formatFileSize(sqlStats.size)
         };
     } catch (error) {
         console.error('Stats error:', error);
-        return {
-            tablesRecovered: 0,
-            recordsRecovered: 0,
-            dataSize: '0 Bytes'
-        };
+        // Fallback: try to estimate from SQL file size without loading into memory
+        try {
+            const dbStats = await fs.stat(dbPath);
+            const sqlStats = await fs.stat(sqlPath);
+            return {
+                tablesRecovered: 0,
+                recordsRecovered: 0,
+                dataSize: formatFileSize(dbStats.size),
+                sqlSize: formatFileSize(sqlStats.size)
+            };
+        } catch {
+            return {
+                tablesRecovered: 0,
+                recordsRecovered: 0,
+                dataSize: '0 Bytes',
+                sqlSize: '0 Bytes'
+            };
+        }
     }
+}
+
+// Helper function to query database
+function queryDatabase(dbPath, query) {
+    return new Promise((resolve, reject) => {
+        const sqlite3 = spawn('sqlite3', [dbPath, '-json', query], {
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let output = '';
+        let error = '';
+
+        sqlite3.stdout.on('data', (data) => {
+            output += data.toString();
+        });
+
+        sqlite3.stderr.on('data', (data) => {
+            error += data.toString();
+        });
+
+        sqlite3.on('close', (code) => {
+            if (code === 0 && output) {
+                try {
+                    resolve(JSON.parse(output));
+                } catch (e) {
+                    resolve(null);
+                }
+            } else {
+                resolve(null);
+            }
+        });
+
+        sqlite3.on('error', (err) => {
+            resolve(null);
+        });
+    });
 }
 
 // Format file size helper
@@ -633,6 +1431,55 @@ function formatFileSize(bytes) {
 app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
+
+// Server-Sent Events endpoint for progress updates
+app.get('/api/progress/:sessionId', (req, res) => {
+    const sessionId = req.params.sessionId;
+    
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+    });
+    
+    // Send initial connection message
+    res.write(`data: ${JSON.stringify({ type: 'connected', message: 'Progress stream connected' })}\n\n`);
+    
+    // Store client connection
+    if (!progressStore.has(sessionId)) {
+        progressStore.set(sessionId, []);
+    }
+    progressStore.get(sessionId).push(res);
+    
+    // Clean up on close
+    req.on('close', () => {
+        const clients = progressStore.get(sessionId);
+        if (clients) {
+            const index = clients.indexOf(res);
+            if (index !== -1) {
+                clients.splice(index, 1);
+            }
+            if (clients.length === 0) {
+                progressStore.delete(sessionId);
+            }
+        }
+    });
+});
+
+// Helper function to send progress updates
+function sendProgress(sessionId, data) {
+    const clients = progressStore.get(sessionId);
+    if (clients && clients.length > 0) {
+        const message = `data: ${JSON.stringify(data)}\n\n`;
+        clients.forEach(client => {
+            try {
+                client.write(message);
+            } catch (err) {
+                console.error('Error sending progress:', err);
+            }
+        });
+    }
+}
 
 // Start server
 async function startServer() {
@@ -673,17 +1520,23 @@ async function startServer() {
 }
 
 // Extract SQLite database from ZIP file using alternative method for corrupted files
-async function extractSqliteFromZip(zipPath, timestamp) {
+async function extractSqliteFromZip(zipPath, timestamp, sessionId) {
+    console.log('[ZIP] Starting extraction process...');
     try {
         // First, try with adm-zip normally
         let zip;
         let zipEntries;
+        console.log('[ZIP] Reading ZIP file with adm-zip...');
         
         try {
+            console.log('[ZIP] Creating AdmZip instance...');
             zip = new AdmZip(zipPath);
+            console.log('[ZIP] Getting ZIP entries...');
             zipEntries = zip.getEntries();
+            console.log(`[ZIP] Found ${zipEntries.length} entries in ZIP file`);
         } catch (zipError) {
-            console.log('Failed to read ZIP with adm-zip, trying alternative method...');
+            console.log('[ZIP] Failed to read ZIP with adm-zip:', zipError.message);
+            console.log('[ZIP] Trying alternative method...');
             return await extractWithAlternativeMethod(zipPath, timestamp);
         }
         

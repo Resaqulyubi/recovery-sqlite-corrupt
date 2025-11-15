@@ -149,27 +149,98 @@ function getRecoveryOptions() {
 async function performActualRecovery(options) {
     const progressFill = document.getElementById('progressFill');
     const progressText = document.getElementById('progressText');
+    const progressPercent = document.getElementById('progressPercent');
+    const progressEstimate = document.getElementById('progressEstimate');
+    const progressLogContent = document.getElementById('progressLogContent');
     
-    // Create FormData for file upload
-    const formData = new FormData();
-    formData.append('database', selectedFile);
-    formData.append('ignoreFreelist', options.ignoreFreelist);
-    formData.append('noRowids', options.noRowids);
-    formData.append('lostFoundTable', options.lostFoundTable);
+    // Generate unique session ID for this recovery
+    const sessionId = Date.now().toString() + Math.random().toString(36).substring(7);
     
-    // Update progress
-    progressFill.style.width = '10%';
-    const fileExtension = '.' + selectedFile.name.split('.').pop().toLowerCase();
-    progressText.textContent = fileExtension === '.zip' ? 'Uploading and extracting ZIP file...' : 'Uploading database file...';
+    // Connect to progress stream
+    let eventSource = null;
+    let startTime = Date.now();
     
     try {
+        // Setup SSE connection for progress updates
+        eventSource = new EventSource(`/api/progress/${sessionId}`);
+        
+        eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                
+                if (data.type === 'progress') {
+                    // Update progress bar
+                    progressFill.style.width = data.progress + '%';
+                    progressPercent.textContent = data.progress + '%';
+                    progressText.textContent = data.message;
+                    
+                    // Calculate estimated time
+                    const elapsed = Date.now() - startTime;
+                    const estimatedTotal = data.progress > 0 ? (elapsed / data.progress) * 100 : 0;
+                    const remaining = estimatedTotal - elapsed;
+                    
+                    if (remaining > 0 && data.progress < 100) {
+                        const minutes = Math.floor(remaining / 60000);
+                        const seconds = Math.floor((remaining % 60000) / 1000);
+                        progressEstimate.textContent = `Est. time remaining: ${minutes}m ${seconds}s`;
+                    } else {
+                        progressEstimate.textContent = '';
+                    }
+                    
+                    // Add to detailed log
+                    const logEntry = document.createElement('div');
+                    logEntry.style.padding = '4px 0';
+                    logEntry.style.borderBottom = '1px solid #ddd';
+                    logEntry.innerHTML = `
+                        <span style="color: #16a085; font-weight: bold;">[${data.progress}%]</span>
+                        <span style="color: #555;">${data.phase}:</span>
+                        ${data.message}
+                        ${data.detail ? `<br><span style="color: #7f8c8d; font-size: 0.9em; padding-left: 20px;">→ ${data.detail}</span>` : ''}
+                    `;
+                    progressLogContent.appendChild(logEntry);
+                    
+                    // Auto-scroll log to bottom
+                    const progressLog = document.getElementById('progressLog');
+                    if (progressLog.style.display !== 'none') {
+                        progressLog.scrollTop = progressLog.scrollHeight;
+                    }
+                }
+            } catch (e) {
+                console.error('Error parsing progress data:', e);
+            }
+        };
+        
+        eventSource.onerror = (error) => {
+            console.error('SSE connection error:', error);
+        };
+        
+        // Create FormData for file upload
+        const formData = new FormData();
+        formData.append('database', selectedFile);
+        formData.append('ignoreFreelist', options.ignoreFreelist);
+        formData.append('noRowids', options.noRowids);
+        formData.append('lostFoundTable', options.lostFoundTable);
+        
+        // Initial progress
+        progressFill.style.width = '5%';
+        progressPercent.textContent = '5%';
+        const fileExtension = '.' + selectedFile.name.split('.').pop().toLowerCase();
+        progressText.textContent = fileExtension === '.zip' ? 'Uploading ZIP file...' : 'Uploading database file...';
+        
+        // Create AbortController with 10-minute timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
+        
         const response = await fetch('/api/recover', {
             method: 'POST',
-            body: formData
+            body: formData,
+            signal: controller.signal,
+            headers: {
+                'X-Session-ID': sessionId
+            }
         });
         
-        progressFill.style.width = '50%';
-        progressText.textContent = 'Running SQLite recovery process...';
+        clearTimeout(timeoutId);
         
         if (!response.ok) {
             const errorData = await response.json();
@@ -178,8 +249,16 @@ async function performActualRecovery(options) {
         
         const result = await response.json();
         
+        // Final progress update
         progressFill.style.width = '100%';
+        progressPercent.textContent = '100%';
         progressText.textContent = 'Recovery complete!';
+        progressEstimate.textContent = '';
+        
+        // Close SSE connection
+        if (eventSource) {
+            eventSource.close();
+        }
         
         return {
             sqlFile: result.sqlFile,
@@ -188,7 +267,24 @@ async function performActualRecovery(options) {
         };
         
     } catch (error) {
+        // Close SSE connection on error
+        if (eventSource) {
+            eventSource.close();
+        }
+        
+        if (error.name === 'AbortError') {
+            throw new Error('Recovery timed out after 10 minutes. The file may be too large or severely corrupted.');
+        }
         throw new Error(`Recovery failed: ${error.message}`);
+    }
+}
+
+function toggleProgressLog() {
+    const progressLog = document.getElementById('progressLog');
+    if (progressLog.style.display === 'none') {
+        progressLog.style.display = 'block';
+    } else {
+        progressLog.style.display = 'none';
     }
 }
 
@@ -373,3 +469,198 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 });
+
+// ========================================
+// ADVANCED TOOLS FUNCTIONS
+// ========================================
+
+function toggleAdvancedTools() {
+    const content = document.getElementById('advancedToolsContent');
+    const icon = document.getElementById('toolsToggleIcon');
+    
+    if (content.style.display === 'none') {
+        content.style.display = 'block';
+        icon.textContent = '▲';
+    } else {
+        content.style.display = 'none';
+        icon.textContent = '▼';
+    }
+}
+
+function startManualRecovery() {
+    const modal = document.getElementById('manualRecoveryModal');
+    modal.style.display = 'flex';
+}
+
+function closeManualRecoveryModal() {
+    const modal = document.getElementById('manualRecoveryModal');
+    modal.style.display = 'none';
+    
+    // Reset modal state
+    document.getElementById('manualRecoveryFileInput').value = '';
+    document.getElementById('manualRecoveryProgress').style.display = 'none';
+    document.getElementById('manualRecoveryLog').innerHTML = '';
+}
+
+async function executeManualRecovery() {
+    const fileInput = document.getElementById('manualRecoveryFileInput');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        showNotification('Please select a database file', 'warning');
+        return;
+    }
+    
+    // Validate file type
+    const validExtensions = ['.db', '.sqlite', '.sqlite3', '.zip'];
+    const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
+    
+    if (!validExtensions.includes(fileExtension)) {
+        showNotification('Please select a valid SQLite database file (.db, .sqlite, .sqlite3) or ZIP file', 'error');
+        return;
+    }
+    
+    const progressDiv = document.getElementById('manualRecoveryProgress');
+    const progressFill = document.getElementById('manualProgressFill');
+    const progressText = document.getElementById('manualProgressText');
+    const logDiv = document.getElementById('manualRecoveryLog');
+    
+    progressDiv.style.display = 'block';
+    progressText.textContent = 'Uploading database...';
+    
+    try {
+        // Upload file and start manual recovery
+        const formData = new FormData();
+        formData.append('database', file);
+        
+        const sessionId = Date.now().toString() + Math.random().toString(36).substring(7);
+        
+        // Connect to SSE for progress
+        const eventSource = new EventSource(`/api/progress/${sessionId}`);
+        
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'progress') {
+                progressFill.style.width = data.progress + '%';
+                progressText.textContent = `${data.message} (${data.progress}%)`;
+                
+                const logEntry = document.createElement('div');
+                logEntry.style.padding = '5px';
+                logEntry.style.borderBottom = '1px solid #ddd';
+                logEntry.innerHTML = `<strong>[${data.progress}%]</strong> ${data.message}`;
+                if (data.detail) {
+                    logEntry.innerHTML += `<br><span style="color: #666; font-size: 0.9em;">${data.detail}</span>`;
+                }
+                logDiv.appendChild(logEntry);
+                logDiv.scrollTop = logDiv.scrollHeight;
+            }
+        };
+        
+        progressText.textContent = 'Starting manual table-by-table recovery...';
+        
+        const response = await fetch('/api/manual-recovery', {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Session-ID': sessionId
+            }
+        });
+        
+        eventSource.close();
+        
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Manual recovery failed');
+        }
+        
+        const result = await response.json();
+        
+        progressFill.style.width = '100%';
+        progressText.textContent = `✅ Recovery complete! ${result.tablesRecovered}/${result.totalTables} tables recovered`;
+        
+        // Provide download links
+        const downloadSection = document.createElement('div');
+        downloadSection.style.marginTop = '20px';
+        downloadSection.innerHTML = `
+            <p><strong>Recovery completed successfully!</strong></p>
+            <button class="btn btn-primary" onclick="downloadManualRecoveryFile('${result.sqlFile}')">
+                <i class="fas fa-download"></i> Download SQL File
+            </button>
+            <button class="btn btn-primary" onclick="downloadManualRecoveryFile('${result.dbFile}')" style="margin-left: 10px;">
+                <i class="fas fa-download"></i> Download Database
+            </button>
+        `;
+        logDiv.appendChild(downloadSection);
+        
+        showNotification('Manual recovery completed successfully!', 'success');
+        
+    } catch (error) {
+        progressText.textContent = '❌ ' + error.message;
+        showNotification('Manual recovery failed: ' + error.message, 'error');
+    }
+}
+
+function downloadManualRecoveryFile(filename) {
+    const a = document.createElement('a');
+    a.href = `/api/download/${filename}`;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+async function checkRecoveryStatus() {
+    try {
+        const response = await fetch('/api/status');
+        const status = await response.json();
+        
+        let message = '';
+        if (status.isStuck) {
+            message = `⚠️ Recovery appears to be STUCK!\n\n`;
+            message += `File: ${status.fileName}\n`;
+            message += `Size: ${status.fileSize}\n`;
+            message += `Last modified: ${status.lastModified}\n`;
+            message += `Idle time: ${status.idleSeconds} seconds\n\n`;
+            message += `Recommendation: Use "Force Stop" then try "Manual Table Recovery"`;
+        } else if (status.isActive) {
+            message = `✅ Recovery is ACTIVE and progressing\n\n`;
+            message += `File: ${status.fileName}\n`;
+            message += `Size: ${status.fileSize}\n`;
+            message += `Last modified: ${status.lastModified}\n`;
+            message += `Still writing data...`;
+        } else {
+            message = `ℹ️ No active recovery process detected\n\n`;
+            message += status.message || 'No recovery files found';
+        }
+        
+        alert(message);
+        
+    } catch (error) {
+        showNotification('Failed to check status: ' + error.message, 'error');
+    }
+}
+
+async function forceStopRecovery() {
+    if (!confirm('Are you sure you want to force stop all recovery processes? This will kill any running SQLite processes.')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/force-stop', {
+            method: 'POST'
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showNotification('Recovery processes stopped successfully', 'success');
+            alert('Stopped processes:\n' + result.stopped.join('\n'));
+        } else {
+            showNotification('No processes to stop', 'info');
+        }
+        
+    } catch (error) {
+        showNotification('Failed to stop processes: ' + error.message, 'error');
+    }
+}

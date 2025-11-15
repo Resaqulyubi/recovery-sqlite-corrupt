@@ -164,7 +164,21 @@
                 <div class="progress-bar">
                     <div class="progress-fill" id="progressFill"></div>
                 </div>
-                <p id="progressText">Analyzing corrupt database...</p>
+                <div class="progress-details">
+                    <p id="progressText">Analyzing corrupt database...</p>
+                    <p id="progressPercent" style="font-weight: bold; color: #1abc9c;">0%</p>
+                    <p id="progressEstimate" style="font-size: 0.9em; color: #7f8c8d;"></p>
+                </div>
+                <div class="progress-log" id="progressLog" style="margin-top: 20px; padding: 15px; background: #ecf0f1; border-radius: 8px; max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.85em; display: none;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <strong>Detailed Log:</strong>
+                        <button onclick="document.getElementById('progressLog').style.display='none'" style="background: none; border: none; cursor: pointer; font-size: 1.2em;">&times;</button>
+                    </div>
+                    <div id="progressLogContent"></div>
+                </div>
+                <button class="btn btn-secondary" onclick="toggleProgressLog()" style="margin-top: 10px; font-size: 0.9em;">
+                    <i class="fas fa-list"></i> Show Detailed Log
+                </button>
             </div>
 
             <div class="results-section" id="resultsSection" style="display: none;">
@@ -212,6 +226,111 @@
                 <button class="btn btn-secondary" onclick="resetTool()">
                     <i class="fas fa-redo"></i> Try Again
                 </button>
+            </div>
+
+            <!-- Advanced Recovery Tools Section -->
+            <div class="advanced-tools-section">
+                <div class="tools-header" onclick="toggleAdvancedTools()">
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <h2><i class="fas fa-tools"></i> Advanced Recovery Tools</h2>
+                        <span class="use-when-note">
+                            <i class="fas fa-exclamation-circle"></i> Use when main recovery fails or gets stuck
+                        </span>
+                    </div>
+                    <span class="toggle-icon" id="toolsToggleIcon">▼</span>
+                </div>
+                <div class="tools-content" id="advancedToolsContent" style="display: none;">
+                    <p class="tools-description">
+                        <i class="fas fa-info-circle"></i> Use these tools when standard recovery fails or gets stuck
+                    </p>
+                    
+                    <div class="tools-grid">
+                        <!-- Manual Table Recovery Tool -->
+                        <div class="tool-card">
+                            <div class="tool-icon">
+                                <i class="fas fa-table"></i>
+                            </div>
+                            <h3>Manual Table-by-Table Recovery</h3>
+                            <p>Recover each table individually when full dump gets stuck. Automatically skips corrupted tables.</p>
+                            <div class="tool-features">
+                                <span class="feature-tag"><i class="fas fa-check"></i> Handles stuck processes</span>
+                                <span class="feature-tag"><i class="fas fa-clock"></i> 30s timeout per table</span>
+                                <span class="feature-tag"><i class="fas fa-shield-alt"></i> Skip corrupted data</span>
+                            </div>
+                            <button class="btn btn-primary" onclick="startManualRecovery()">
+                                <i class="fas fa-magic"></i> Start Manual Recovery
+                            </button>
+                        </div>
+
+                        <!-- Diagnostic Tool -->
+                        <div class="tool-card">
+                            <div class="tool-icon">
+                                <i class="fas fa-stethoscope"></i>
+                            </div>
+                            <h3>Check Recovery Status</h3>
+                            <p>Check if a recovery process is stuck and get detailed diagnostic information.</p>
+                            <div class="tool-features">
+                                <span class="feature-tag"><i class="fas fa-heartbeat"></i> Real-time monitoring</span>
+                                <span class="feature-tag"><i class="fas fa-chart-line"></i> Progress tracking</span>
+                                <span class="feature-tag"><i class="fas fa-exclamation-triangle"></i> Stuck detection</span>
+                            </div>
+                            <button class="btn btn-secondary" onclick="checkRecoveryStatus()">
+                                <i class="fas fa-search"></i> Check Status
+                            </button>
+                        </div>
+
+                        <!-- Force Kill Tool -->
+                        <div class="tool-card">
+                            <div class="tool-icon">
+                                <i class="fas fa-stop-circle"></i>
+                            </div>
+                            <h3>Force Stop Recovery</h3>
+                            <p>Force stop a stuck recovery process and clean up resources.</p>
+                            <div class="tool-features">
+                                <span class="feature-tag"><i class="fas fa-power-off"></i> Kill processes</span>
+                                <span class="feature-tag"><i class="fas fa-broom"></i> Clean resources</span>
+                                <span class="feature-tag"><i class="fas fa-redo"></i> Reset state</span>
+                            </div>
+                            <button class="btn btn-danger" onclick="forceStopRecovery()">
+                                <i class="fas fa-ban"></i> Force Stop
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Manual Recovery Modal -->
+                    <div id="manualRecoveryModal" class="modal" style="display: none;">
+                        <div class="modal-content">
+                            <span class="modal-close" onclick="closeManualRecoveryModal()">&times;</span>
+                            <h3><i class="fas fa-table"></i> Manual Table-by-Table Recovery</h3>
+                            <p>This will recover each table individually. Corrupted tables will be skipped automatically.</p>
+                            
+                            <div class="modal-section">
+                                <label>Select database file or ZIP archive:</label>
+                                <input type="file" id="manualRecoveryFileInput" accept=".db,.sqlite,.sqlite3,.zip" class="file-input">
+                                <p style="font-size: 0.9em; color: #718096; margin-top: 10px;">
+                                    <i class="fas fa-info-circle"></i> Accepts .db, .sqlite, .sqlite3, or .zip files containing a database
+                                </p>
+                            </div>
+
+                            <div class="modal-progress" id="manualRecoveryProgress" style="display: none;">
+                                <div class="progress-bar">
+                                    <div class="progress-fill" id="manualProgressFill"></div>
+                                </div>
+                                <p id="manualProgressText">Starting recovery...</p>
+                                <div class="recovery-log" id="manualRecoveryLog"></div>
+                            </div>
+
+                            <div class="modal-actions">
+                                <button class="btn btn-primary" onclick="executeManualRecovery()">
+                                    <i class="fas fa-play"></i> Start Recovery
+                                </button>
+                                <button class="btn btn-secondary" onclick="closeManualRecoveryModal()">
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </main>
 
